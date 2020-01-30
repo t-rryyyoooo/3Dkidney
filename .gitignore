@@ -9,6 +9,7 @@ showLog/
 z
 *.yml
 *.hdf5
+*.mha
 testingList/
 weightFolder/
 .DS_Store
