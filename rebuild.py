@@ -3,7 +3,6 @@ import os
 import numpy as np
 import tensorflow as tf
 import SimpleITK as sitk
-from tensorflow.python.keras import layers as klayers
 import matplotlib.pyplot as plt
 from tensorflow import name_scope
 import argparse
@@ -14,6 +13,9 @@ import yaml
 import time
 import csv
 import tensorflow.python.keras.backend as K
+from Unet import Construct3DUnetModel
+
+
 
 args = None
 
@@ -37,181 +39,7 @@ def ParseArgs():
     return args
 
 
-def CreateConv3DBlock(x, filters, n = 2, use_bn = True, apply_pooling = True, name = 'convblock'):
-    for i in range(n):
-        x = klayers.Conv3D(filters[i], (3,3,3), padding='valid', name=name+'_conv'+str(i+1))(x)
-        if use_bn:
-            x = klayers.BatchNormalization(name=name+'_BN'+str(i+1))(x)
-        x = klayers.Activation('relu', name=name+'_relu'+str(i+1))(x)
-
-    convresult = x
-
-    if apply_pooling:
-        x = klayers.MaxPool3D(pool_size=(2,2,2), name=name+'_pooling')(x)
-
-    return x, convresult
-
-def CreateUpConv3DBlock(x, contractpart, filters, n = 2, use_bn = True, name = 'upconvblock'):
-    # upconv x
-    x = klayers.Conv3DTranspose((int)(x.shape[-1]), (2,2,2), strides=(2,2,2), padding='same', use_bias = False, name=name+'_upconv')(x)
-    # concatenate contractpart and x
-    c = [(i-j)//2 for (i, j) in zip(contractpart[0].shape[1:4].as_list(), x.shape[1:4].as_list())]
-    contract_crop = klayers.Cropping3D(cropping=((c[0],c[0]),(c[1],c[1]),(c[2],c[2])))(contractpart[0])
-    if len(contractpart) > 1:
-        crop1 = klayers.Cropping3D(cropping=((c[0],c[0]),(c[1],c[1]),(c[2],c[2])))(contractpart[1])
-        #crop2 = klayers.Cropping3D(cropping=((c[0],c[0]),(c[1],c[1]),(c[2],c[2])))(contractpart[2])
-        #x = klayers.concatenate([contract_crop, crop1, crop2, x])
-        x = klayers.concatenate([contract_crop, crop1, x])
-    else:
-        x = klayers.concatenate([contract_crop, x])
-
-    # conv x 2 times
-    for i in range(n):
-        x = klayers.Conv3D(filters[i], (3,3,3), padding='valid', name=name+'_conv'+str(i+1))(x)
-        if use_bn:
-            x = klayers.BatchNormalization(name=name+'_BN'+str(i+1))(x)
-        x = klayers.Activation('relu', name=name+'_relu'+str(i+1))(x)
-
-    return x
-
-def Construct3DUnetModel(input_images, nclasses, use_bn = True, use_dropout = True):
-    with name_scope("contract1"):
-        x, contract1 = CreateConv3DBlock(input_images, (32, 64), n = 2, use_bn = use_bn, name = 'contract1')
-
-    with name_scope("contract2"):
-        x, contract2 = CreateConv3DBlock(x, (64, 128), n = 2, use_bn = use_bn, name = 'contract2')
-
-    with name_scope("contract3"):
-        x, contract3 = CreateConv3DBlock(x, (128, 256), n = 2, use_bn = use_bn, name = 'contract3')
-
-    with name_scope("contract4"):
-        x, _ = CreateConv3DBlock(x, (256, 512), n = 2, use_bn = use_bn, apply_pooling = False, name = 'contract4')
-
-    with name_scope("dropout"):
-        if use_dropout:
-            x = klayers.Dropout(0.5, name='dropout')(x)
-
-    with name_scope("expand3"):
-        x = CreateUpConv3DBlock(x, [contract3], (256, 256), n = 2, use_bn = use_bn, name = 'expand3')
-
-    with name_scope("expand2"):
-        x = CreateUpConv3DBlock(x, [contract2], (128, 128), n = 2, use_bn = use_bn, name = 'expand2')
-
-    with name_scope("expand1"):
-        x = CreateUpConv3DBlock(x, [contract1], (64, 64), n = 2, use_bn = use_bn, name = 'expand1')
-
-    with name_scope("segmentation"):
-        layername = 'segmentation_{}classes'.format(nclasses)
-        x = klayers.Conv3D(nclasses, (1,1,1), activation='softmax', padding='same', name=layername)(x)
-
-    return x
-
-def ReadSliceDataList(filename):
-    datalist = []
-    with open(filename) as f:
-        for line in f:
-            imagefile, labelfile = line.strip().split()
-            datalist.append((imagefile, labelfile))
-
-    return datalist
-
-def dice(y_true, y_pred):
-    K = tf.keras.backend
-
-    eps = K.constant(1e-6)
-    truelabels = tf.argmax(y_true, axis=-1, output_type=tf.int32)
-    predictions = tf.argmax(y_pred, axis=-1, output_type=tf.int32)
-
-    intersection = K.cast(K.sum(K.minimum(K.cast(K.equal(predictions, truelabels), tf.int32), truelabels)), tf.float32)
-    union = tf.count_nonzero(predictions, dtype=tf.float32) + tf.count_nonzero(truelabels, dtype=tf.float32)
-    dice = 2 * intersection / (union + eps)
-    return dice
-
-def ImportImage(filename):
-    image = sitk.ReadImage(filename)
-    imagearry = sitk.GetArrayFromImage(image)
-    if image.GetNumberOfComponentsPerPixel() == 1:
-        imagearry = imagearry[..., np.newaxis]
-    return imagearry
-
-def GenerateBatchData(datalist, paddingsize, batch_size = 32):
-    ps = paddingsize[::-1] # (x, y, z) -> (z, y, x) for np.array
-    #j = 0
-
-    while True:
-        indices = list(range(len(datalist)))
-        random.shuffle(indices)
-
-        for i in range(0, len(indices), batch_size):
-            imagelist = []
-            outputlist = []
-
-            for idx in indices[i:i+batch_size]:
-                image = ImportImage(datalist[idx][0])
-                onehotlabel = ImportImage(datalist[idx][1])
-
-                onehotlabel = onehotlabel[ps[0]:-ps[0], ps[1]:-ps[1], ps[2]:-ps[2]]
-                imagelist.append(image)
-                outputlist.append(onehotlabel)
-
-            yield (np.array(imagelist), np.array(outputlist))
-
-
-
-def penalty_categorical(y_true,y_pred):
-    array_t = tf.convert_to_tensor(y_true,dtype=tf.float32)
-    pred_t = tf.convert_to_tensor(y_pred,dtype=tf.float32)
-
-    boxel_black = K.sum(K.cast((K.equal(K.argmax(array_t,axis=-1),0)),"float32"))
-    boxel_kid = K.sum(K.cast((K.equal(K.argmax(array_t,axis=-1),1)),"float32"))
-    boxel_can = K.sum(K.cast((K.equal(K.argmax(array_t,axis=-1),2)),"float32"))
-    
-    
-    boxel_black = tf.pow(boxel_black,1.0/3)
-    boxel_kid = tf.pow(boxel_kid,1.0/3)
-    boxel_can = tf.pow(boxel_can,1.0/3)
-    
-    a = tf.convert_to_tensor([boxel_black,boxel_can,boxel_kid],dtype=tf.float32)
-    boxel = tf.reduce_sum(a)
-    boxel_black /= boxel
-    boxel_can /= boxel
-    boxel_kid /= boxel
-
-    if boxel_black == 0:
-        y_pred_0 = pred_t[:,:,:,:,0]
-    else:
-        y_pred_0 = pred_t[:,:,:,:,0] / boxel_black
-
-    if boxel_kid==0:
-        y_pred_1 = pred_t[:,:,:,:,1]
-    else:
-        y_pred_1 = pred_t[:,:,:,:,1] / boxel_kid 
-    
-    if boxel_can==0:
-        y_pred_2 = pred_t[:,:,:,:,2] 
-    else:
-        y_pred_2 = pred_t[:,:,:,:,2] / boxel_can
-
-    y_pred_new = K.stack([y_pred_0, y_pred_1, y_pred_2], axis=-1)
-
-    return K.categorical_crossentropy(array_t,y_pred_new)
-
-def penalty_categorical2(y_true,y_pred):
-    array_tf = tf.convert_to_tensor(y_true,dtype=tf.float32)
-    pred_tf = tf.convert_to_tensor(y_pred,dtype=tf.float32)
-
-    epsilon = K.epsilon()
-
-    result = tf.reduce_sum(array_tf,[0,1,2,3])
-
-    result_pow = tf.pow(result,1.0/3.0)
-    weight_y = result_pow / tf.reduce_sum(result_pow)
-
-    return (-1) * tf.reduce_sum( 1 / (weight_y + epsilon) * array_tf * tf.log(pred_tf + epsilon),axis=-1)
-    
-
 def main(_):
-    t1 = time.time()
     #Build 3DU-net
     matchobj = re.match("([0-9]+)x([0-9]+)x([0-9]+)", args.patchsize)
     if matchobj is None:
@@ -318,18 +146,7 @@ def main(_):
         
     history_file.close()
 
-    t2 = time.time()
-   
-    """
-    plt.plot(range(epochs),loss,color='red',label='dice')
-    plt.plot(range(epochs),val_loss,color='blue',label='val_dice')
-    plt.grid()
-    plt.legend()
-    plt.xlabel("epoch")
-    plt.ylabel('dice')
-    plt.show()
-    """
-    tf.keras.backend.clear_session()
+     tf.keras.backend.clear_session()
 
     print("\ntime:"+str(t2 - t1))
 
