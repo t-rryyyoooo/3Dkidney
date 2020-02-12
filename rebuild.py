@@ -21,7 +21,7 @@ args = None
 
 def ParseArgs():
     parser = argparse.ArgumentParser(description='This is a build 3D_U_Net program')
-    parser.add_argument("datafile", help="Input Dataset file(stracture:data_path label_path)")
+    parser.add_argument("dataFile", help="Input Dataset file(stracture:data_path label_path)")
     parser.add_argument("-o", "--outfile", help="Output model structure file in YAML format (*.yml).")
     parser.add_argument("-t","--testfile", help="Input Dataset file for validation (stracture:data_path label_path)")
     parser.add_argument("-p", "--patchsize", help="Patch size. (ex. 44x44x28)", default="44x44x28")
@@ -41,33 +41,20 @@ def ParseArgs():
 
 def main(_):
     #Build 3DU-net
-    matchobj = re.match("([0-9]+)x([0-9]+)x([0-9]+)", args.patchsize)
-    if matchobj is None:
-        print('[ERROR] Invalid patch size : {}'.format(args.patchsize))
-        return
-    patchsize = [ int(s) for s in matchobj.groups() ]
-    patchsize = tuple(patchsize)
 
-    padding = 44
-    imagesize = tuple([ p + 2*padding for p in patchsize ]) 
-    inputshape = imagesize[::-1] + (1,)
+    inputShape = getInputShape(args.dataFile)
     nclasses = args.nclasses
     print("Input shape:", inputshape)
     print("Number of classes:", nclasses)
 
     inputs = tf.keras.layers.Input(shape=inputshape, name="input")
-    segmentation = Construct3DUnetModel(inputs, nclasses, args.use_bn, args.use_dropout)
+    segmentation = Construct3DUnetModel(inputs, nclasses, not args.nobn, not args.nodropout)
 
     model = tf.keras.models.Model(inputs, segmentation,name="3DUnet")
     model.summary()
 
     #Start training
-    config = tf.ConfigProto(
-        gpu_options=tf.GPUOptions(
-          per_process_gpu_memory_fraction=0.8
-          )
-    )
-
+    config = tf.ConfigProto()
     config.gpu_options.allow_growth = True
     config.allow_soft_placement = True
     sess = tf.Session(config=config)

@@ -17,6 +17,12 @@ def ImportImage(filename):
         imageArray = imageArray[..., np.newaxis]
     return imageArray
 
+def getInputShape(fileName):
+    dataList = ReadSliceDataList(fileName)
+    imageArray = ImportImage(dataList[0][0])
+
+    return imageArray.shape 
+
 def GenerateBatchData(dataList, paddingSize, batch_size = 32):
     ps = paddingSize[::-1] # (x, y, z) -> (z, y, x) for np.array
     #j = 0
