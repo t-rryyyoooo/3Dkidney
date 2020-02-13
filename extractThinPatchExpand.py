@@ -10,6 +10,11 @@ from pathlib import Path
 import re
 
 args = None
+#######
+
+# It's not complete.
+
+######
 
 def ParseArgs():
     parser = argparse.ArgumentParser()
@@ -17,7 +22,6 @@ def ParseArgs():
     parser.add_argument("originalFilePath", help="$HOME/Desktop/data/kits19/case_00000")
     parser.add_argument("savePath", help="$HOME/Desktop/data/slice/hist_0.0")
     parser.add_argument("--outputSize", default="128-128-8")
-    parser.add_argument("--expand", action="store_true")
     parser.add_argument("--expandSize", default=15, type=int)
     parser.add_argument("--paddingSize",default=100, type=int)
 
@@ -56,7 +60,6 @@ def main(args):
     
     labelMinVal = labelArray.min()
     imageMinVal = imageArray.min()
-    print(imageMinVal, labelMinVal)
 
     print("Whole size: ",labelArray.shape)
 
@@ -131,7 +134,8 @@ def main(args):
         maxAreaLabelArray = largestKidneyROILabel[i][..., maxArea]
         roi, maxCenter, maxwh, maxAngle = cut_image(maxAreaLabelArray, paddingSize=expandSize)
 
-        maxWH = (max(maxwh), max(maxwh))
+        maxWH = maxwh
+        reverseMaxWH = tuple(list(maxWH)[::-1])
 
         # Extract roi per slice
         for x in range(axialSize):
@@ -151,11 +155,35 @@ def main(args):
 
             ##腎臓領域ありの時
             else:
-                roi, center, wh, angle = cut_image(largestKidneyROILabel[i][..., x],wh=maxWH, paddingSize=expandSize)##中心,角度取得
-                roi_label = roi
-                    
-                roi, center, wh, angle = cut_image(largestKidneyROIImage[i][..., x], center=center, wh=wh, angle=angle, paddingSize=expandSize)
+                roi, center, wh, angle = cut_image(largestKidneyROILabel[i][..., x])
+                if (maxWH[0] > maxWH[1]) == (wh[0] > wh[1]):
+                    roi, center, wh, angle = cut_image(largestKidneyROILabel[i][..., x], wh=maxWH)
+                    roi_label = roi
+
+                else:
+                    roi, center, wh, angle = cut_image(largestKidneyROILabel[i][..., x], wh=reverseMaxWH)
+                    roi_label = roi
+
+                roi, center, wh, angle = cut_image(largestKidneyROILabel[i][..., x], center=center, wh=wh, angle=angle)
                 roi_image = roi
+
+                roi_label = sitk.GetImageFromArray(roi_label)
+                roi_image = sitk.GetImageFromArray(roi_image)
+                d = sliceImage.GetDirection()
+                s = sliceImage.GetSpacing()
+                o = sliceImage.GetOrigin()
+                roi_label.SetDirection(d)
+                roi_label.SetSpacing(s)
+                roi_label.SetOrigin(o)
+                roi_image.SetDirection(d)
+                roi_image.SetSpacing(s)
+                roi_image.SetOrigin(o)
+
+                roi_label = ResampleSize(roi_label, outputSize[:2], is_label=True)
+                roi_image = ResampleSize(roi_image, outputSize[:2])
+
+                roi_label = sitk.GetArrayFromImage(roi_label)
+                roi_image = sitk.GetArrayFromImage(roi_image)
 
 
             roiLabelList.append(roi_label)
@@ -163,7 +191,7 @@ def main(args):
 
 
         length = len(roiLabelList)
-        imageZero = np.zeros_like(roi_label) - abs(imageMinVal)
+        imageZero = np.zeros_like(roi_label) - imageMinVal
         labelZero = np.zeros_like(roi_label) - labelMinVal
         
         for x in range(-outputSize[2] + 1, length):
