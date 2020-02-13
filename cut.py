@@ -266,6 +266,25 @@ def inverse_image(roi, cutKidFragLabel, wh, center, angle, paddingSize=15, clipS
     
     return iImg
 
+def centerCrop(imageArray, clipSize):
+    center = tuple(map(lambda s : s // 2, imageArray.shape))
+    start = tuple(map(lambda c, s : c - (s // 2), center, clipSize))
+    end = tuple(map(lambda s, cs : s + cs, start, clipSize))
+    
+    clip = tuple(map(slice, start, end))    
+
+    return imageArray[clip]
+    
+
+def padAndCenterCrop(imageArray, newSize):
+    imageSize = imageArray.shape
+    minVal = imageArray.min()
+    diff = tuple(map(lambda x, y : x - y,  newSize, imageSize))
+    padSize = tuple(map(lambda d : (d//2, d - d//2) if d >= 0 else (0, 0), diff))
+    imageArray = np.pad(imageArray, padSize, "constant", constant_values=minVal)
+    imageArray = centerCrop(imageArray, newSize)
+
+    return imageArray
 
 def saveSliceImage256(imgArray, img, savePath, interpolation):
 

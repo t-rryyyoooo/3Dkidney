@@ -4,8 +4,8 @@ import argparse
 import copy
 import os
 import sys
-from functions import createParentPath, write_file, Resampling, ResampleSize
-from cut import *
+from functions import createParentPath, write_file
+from cut import cut3D, caluculate_area, cut_image, padAndCenterCrop
 from pathlib import Path
 import re
 
@@ -56,7 +56,6 @@ def main(args):
     
     labelMinVal = labelArray.min()
     imageMinVal = imageArray.min()
-    print(imageMinVal, labelMinVal)
 
     print("Whole size: ",labelArray.shape)
 
@@ -110,8 +109,8 @@ def main(args):
             largestKidneyROILabel[i] = largestKidneyROILabel[i][::-1,:,:]
             largestKidneyROIImage[i] = largestKidneyROIImage[i][::-1,:,:]
 
-        largestKidneyROILabel[i] = np.pad(largestKidneyROILabel[i], [(args.paddingSize, args.paddingSize), (args.paddingSize, args.paddingSize), (0, 0)], "minimum")
-        largestKidneyROIImage[i] = np.pad(largestKidneyROIImage[i], [(args.paddingSize, args.paddingSize), (args.paddingSize, args.paddingSize), (0, 0)], "minimum")
+        largestKidneyROILabel[i] = np.pad(largestKidneyROILabel[i], [(args.paddingSize, args.paddingSize), (args.paddingSize, args.paddingSize), (0, 0)],"constant", constant_values= labelMinVal)
+        largestKidneyROIImage[i] = np.pad(largestKidneyROIImage[i], [(args.paddingSize, args.paddingSize), (args.paddingSize, args.paddingSize), (0, 0)], "constant", constant_values=imageMinVal)
 
         
         #axial方向について、３D画像として切り取る
@@ -163,8 +162,8 @@ def main(args):
 
 
         length = len(roiLabelList)
-        imageZero = np.zeros_like(roi_label) - abs(imageMinVal)
-        labelZero = np.zeros_like(roi_label) - labelMinVal
+        imageZero = np.zeros_like(roi_label) + imageMinVal
+        labelZero = np.zeros_like(roi_label) + labelMinVal
         
         for x in range(-outputSize[2] + 1, length):
             stackedImageArray = []
@@ -176,7 +175,6 @@ def main(args):
                 else:
                     stackedImageArray.append(imageZero)
                     stackedLabelArray.append(labelZero)
-
             stackedImageArray = np.dstack(stackedImageArray)
             stackedLabelArray = np.dstack(stackedLabelArray)
             stackedImageArrayList.append(stackedImageArray)
@@ -197,10 +195,16 @@ def main(args):
         if not OPT.parent.exists():
             createParentPath(str(OPT))
 
+        length = length + outputSize[2] - 1
         for x in range(length):
             OPI = Path(args.savePath) / 'image' / patientID / "image{}_{:02d}.mha".format(i,x)
             OPL = Path(args.savePath) / 'image' / patientID / "label{}_{:02d}.mha".format(i,x)
             OPT = Path(args.savePath) / 'path' / (patientID + '.txt')
+
+            stackedShape = stackedImageArrayList[x].shape
+            stackedImageArrayList[x] = padAndCenterCrop(stackedImageArrayList[x], outputSize)
+            stackedLabelArrayList[x] = padAndCenterCrop(stackedLabelArrayList[x], outputSize)
+
            
             stackedImage = sitk.GetImageFromArray(stackedImageArrayList[x])
             stackedLabel = sitk.GetImageFromArray(stackedLabelArrayList[x])
@@ -212,12 +216,6 @@ def main(args):
             stackedLabel.SetSpacing(image.GetSpacing())
             stackedLabel.SetOrigin(image.GetOrigin())
             stackedLabel.SetDirection(image.GetDirection())
-
-
-            stackedNewSize = outputSize[::-1]
-
-            stackedImage = ResampleSize(stackedImage, stackedNewSize)
-            stackedLabel = ResampleSize(stackedLabel, stackedNewSize, is_label=True)
 
             sitk.WriteImage(stackedImage, str(OPI), True)
             sitk.WriteImage(stackedLabel, str(OPL), True)
