@@ -4,18 +4,11 @@ import numpy as np
 import tensorflow as tf
 import SimpleITK as sitk
 import matplotlib.pyplot as plt
-from tensorflow import name_scope
 import argparse
 import re
-from pathlib import Path
 import random
 import yaml
-import time
-import csv
-import tensorflow.python.keras.backend as K
 from Unet import Construct3DUnetModel
-
-
 
 args = None
 
@@ -34,6 +27,7 @@ def ParseArgs():
     parser.add_argument("--logdir", help="Log directory", default='log')
     parser.add_argument("--nobn", help="Do not use batch normalization layer", dest="use_bn", action='store_false')
     parser.add_argument("--nodropout", help="Do not use dropout layer", dest="use_dropout", action='store_false')
+    parser.add_argument("--noAugmentation", help="Do not use data augmentation", dest="use_augmentation", action="store_false")
     parser.add_argument("-g", "--gpuid", help="ID of GPU to be used for segmentation. [default=0]", default=0, type=int)
     args = parser.parse_args()
     return args
@@ -94,11 +88,11 @@ def main(_):
 
     #read dataset
     trainingdatalist = ReadSliceDataList(args.datafile)
-    train_data = GenerateBatchData(trainingdatalist, paddingsize, batch_size = args.batchsize)
+    train_data = GenerateBatchData(trainingdatalist, apply_augmentation=args.use_augmentation, num_class= nclasses, batch_size = args.batchsize)
     if args.testfile is not None:
         testdatalist = ReadSliceDataList(args.testfile)
         #testdatalist = random.sample(testdatalist, int(len(testdatalist)*0.3))
-        validation_data = GenerateBatchData(testdatalist, paddingsize, batch_size = args.batchsize)
+        validation_data = GenerateBatchData(testdatalist, apply_augmentation=args.use_augmentation, num_class=nlasses, batch_size = args.batchsize)
         validation_steps = len(testdatalist) / args.batchsize
     else:
         validation_data = None
@@ -120,22 +114,7 @@ def main(_):
             validation_steps = validation_steps,
             initial_epoch = initial_epoch )
             
-    
-    loss = historys.history['dice']
-    val_loss = historys.history['val_dice']
-    epochs = len(loss)
-    
-    history_file = open("history.txt","a")
-
-    for x in range(epochs):
-        print("{}\t{}".format(loss[x],val_loss[x]),file = history_file)
-    print("\n",file=history_file)
-        
-    history_file.close()
-
      tf.keras.backend.clear_session()
-
-    print("\ntime:"+str(t2 - t1))
 
 if __name__ == '__main__':
     args = ParseArgs()
