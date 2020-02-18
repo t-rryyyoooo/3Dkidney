@@ -70,9 +70,9 @@ def main(_):
             yaml.dump(yamlobj, f)
             
     #get padding size
-    ps = np.array(model.output_shape[1:4])[::-1]
-    ips = np.array(model.input_shape[1:4])[::-1]
-    paddingsize = ((ips - ps) / 2).astype(np.int)
+    #ps = np.array(model.output_shape[1:4])[::-1]
+    #ips = np.array(model.input_shape[1:4])[::-1]
+    #paddingsize = ((ips - ps) / 2).astype(np.int)
 
     #A retraining of interruption
     if args.weightfile is None:

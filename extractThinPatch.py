@@ -8,6 +8,7 @@ from functions import createParentPath, write_file
 from cut import cut3D, caluculate_area, cut_image, padAndCenterCrop
 from pathlib import Path
 import re
+from tqdm import tqdm
 
 args = None
 
@@ -15,7 +16,7 @@ def ParseArgs():
     parser = argparse.ArgumentParser()
 
     parser.add_argument("originalFilePath", help="$HOME/Desktop/data/kits19/case_00000")
-    parser.add_argument("savePath", help="$HOME/Desktop/data/slice/hist_0.0")
+    parser.add_argument("savePath", help="$HOME/Desktop/data/slice/thinPatch/case_00000")
     parser.add_argument("--outputSize", default="128-128-8")
     parser.add_argument("--expand", action="store_true")
     parser.add_argument("--expandSize", default=15, type=int)
@@ -31,7 +32,7 @@ def main(args):
         print('[ERROR] Invalid patch size : {}'.format(args.outputSize))
         return
     outputSize = [ int(s) for s in matchobj.groups() ]
-    print("outputSize : ", outputSize)
+    print("outputSize per patch: ", outputSize)
 
     labelFile = Path(args.originalFilePath) / 'segmentation.nii.gz'
     imageFile = Path(args.originalFilePath) / 'imaging.nii.gz'
@@ -57,8 +58,6 @@ def main(args):
     labelMinVal = labelArray.min()
     imageMinVal = imageArray.min()
 
-    print("Whole size: ",labelArray.shape)
-
     # ------------Extract the maximum region with one kidney.------
     saggitalSize = labelArray.shape[0]
     kidneyEncounter = False
@@ -78,9 +77,6 @@ def main(args):
         print("The patient has horse shoe kidney")
         sys.exit()
     
-
-    print(kidneyStartIndex, kidneyEndIndex)
-
     largestKidneyROILabel = []#[[1つ目の腎臓の行列],[2つ目の腎臓の行列],..]
     largestKidneyROIImage = []
 
@@ -116,8 +112,6 @@ def main(args):
         #axial方向について、３D画像として切り取る
         largestKidneyROILabel[i], largestKidneyROIImage[i], cutIndex, snum = cut3D(largestKidneyROILabel[i],largestKidneyROIImage[i],"axial")
         
-        print("cutted size_"+str(i)+": ",largestKidneyROILabel[i].shape)
-
         axialSize = largestKidneyROILabel[i].shape[2]
 
         ##最大サイズの腎臓を持つスライスの特定
@@ -196,9 +190,9 @@ def main(args):
             createParentPath(str(OPT))
 
         length = length + outputSize[2] - 1
-        for x in range(length):
-            OPI = Path(args.savePath) / 'image' / patientID / "image{}_{:02d}.mha".format(i,x)
-            OPL = Path(args.savePath) / 'image' / patientID / "label{}_{:02d}.mha".format(i,x)
+        for x in tqdm(range(length), desc="Saving images...", ncols=60):
+            OPI = Path(args.savePath) / 'image' / patientID / "image_{}_{:02d}.mha".format(i,x)
+            OPL = Path(args.savePath) / 'image' / patientID / "label_{}_{:02d}.mha".format(i,x)
             OPT = Path(args.savePath) / 'path' / (patientID + '.txt')
 
             stackedShape = stackedImageArrayList[x].shape
@@ -219,7 +213,6 @@ def main(args):
 
             sitk.WriteImage(stackedImage, str(OPI), True)
             sitk.WriteImage(stackedLabel, str(OPL), True)
-            print("{}/{} done.".format(x + 1, length))
 
             write_file(str(OPT), str(OPI) + "\t" + str(OPL))
           
