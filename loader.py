@@ -1,3 +1,4 @@
+import random
 import numpy as np
 import SimpleITK as sitk
 import tensorflow as tf
@@ -107,13 +108,13 @@ def GenerateBatchData(dataList, apply_augmentation=False, num_class=3, batch_siz
 
         if apply_augmentation:
             for i in range(0, len(indices), batch_size):
-                imageLabelList = np.array([ImportTransformedImage(dataList[idx][0]) for idx in indices[i : i + batch_size]])
+                imageLabelList = np.array([ImportTransformedImage(dataList[idx][0], dataList[idx][1]) for idx in indices[i : i + batch_size]])
 
                 imageList, labelList = zip(*imageLabelList)
                 
                 onehotLabelList = tf.keras.utils.to_categorical(labelList, num_classes=num_class)
 
-                yield (imageList, onehotLabelList)
+                yield (np.array(imageList), np.array(onehotLabelList))
 
         else:
             for i in range(0, len(indices), batch_size):

@@ -17,7 +17,7 @@ def ParseArgs():
 
     parser.add_argument("originalFilePath", help="$HOME/Desktop/data/kits19/case_00000")
     parser.add_argument("savePath", help="$HOME/Desktop/data/slice/thinPatch/case_00000")
-    parser.add_argument("--outputSize", default="128-128-8")
+    parser.add_argument("--outputSize", help="128-128-8", default="128-128-8")
     parser.add_argument("--expand", action="store_true")
     parser.add_argument("--expandSize", default=15, type=int)
     parser.add_argument("--paddingSize",default=100, type=int)
