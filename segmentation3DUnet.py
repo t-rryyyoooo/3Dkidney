@@ -188,12 +188,13 @@ def main(_):
 
             #For test
             if x >= 0:
+                roiLabelList[x] = padAndCenterCrop(roiLabelList[x], patchSize)
                 test[i].append(roiLabelList[x])
 
             stackedImageArray = np.dstack(stackedImageArray)
             stackedImageArray = padAndCenterCrop(stackedImageArray, patchSize)
             stackedImageArrayList[i].append(stackedImageArray)
-
+            
         # ----- Finish making patch. -----
 
     # restoreDict -> Meta data for image restoration.
@@ -238,16 +239,16 @@ def main(_):
         length = predictArray[i].shape[2]
         restoreImageArrayList = []
         for l in tqdm(range(length), desc="Segmenting...", ncols=60):
-            restoreImageArray = inverse_image(predictArray[i][l], *restoreMeta[i][l], paddingSize=args.expandSize, clipSize=args.paddingSize)
+            restoreImageArray = inverse_image(predictArray[i][..., l], *restoreMeta[i][l], paddingSize=args.expandSize, clipSize=args.paddingSize)
             restoreImageArrayList.append(restoreImageArray)
         restoreImageArray = np.dstack(restoreImageArrayList)
 
         slices = slice(cutIndex[i][0], cutIndex[i][-1] + 1)
         if i == 1:
-            restoreImageArray = restoreImageArray[-1, ...]
-            outputArray[: secondKidneyIndex, :, slices] += restoreImageArray
+            restoreImageArray = restoreImageArray[::-1, ...]
+            outputArray[: secondKidneyIndex, :, slices] = restoreImageArray
         else:
-            outputArray[firstKidneyIndex : , :, slices] += restoreImageArray
+            outputArray[firstKidneyIndex : , :, slices] = restoreImageArray
     # ----- Finish restoring image. -----
 
     output = sitk.GetImageFromArray(outputArray)
