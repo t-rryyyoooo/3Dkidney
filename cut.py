@@ -236,22 +236,17 @@ def save_image_256(imageArray, image, savePath, is_lab=False):
 
     sitk.WriteImage(LF, savePath, True)
 
-# For moreCancer
-def inverse_image(roi, cutKidFragLabel, wh, center, angle, paddingSize=15, clipSize=100):
+# Version 3D U-Net
+# We don't resample in 3D flow, so, we don't have to have wh information.
+def inverse_image(roi, cutKidFragLabel, center, angle, paddingSize=15, clipSize=100):
     blackImg = np.zeros_like(cutKidFragLabel)
 
-    wh = tuple([x+y for x,y in zip(wh,(paddingSize, paddingSize))])
-    
+    wh = roi.shape[::-1]
 
-    x0 = center[1] - int(wh[1]/2) 
-    x1 = center[1] + int(wh[1]/2) 
-    y0 = center[0] - int(wh[0]/2)
-    y1 = center[0] + int(wh[0]/2)
-
-#    if x0<0:
-#        x0 = 0
-#    if y0<0:
-#        y0 = 0
+    x0 = center[1] - wh[1] // 2
+    x1 = center[1] + wh[1] // 2
+    y0 = center[0] - wh[0] // 2
+    y1 = center[0] + wh[0] // 2
 
     blackImg[x0 : x1 , y0 : y1] = roi
 
@@ -260,7 +255,7 @@ def inverse_image(roi, cutKidFragLabel, wh, center, angle, paddingSize=15, clipS
     trans = cv2.getRotationMatrix2D(center, (-1)*angle , 1.0)
 
     #アフィン変換（元画像の行列にさっきの行列をかけて画像を回転）
-    iImg = cv2.warpAffine(blackImg, trans, blackImg.shape[::-1])
+    iImg = cv2.warpAffine(blackImg, trans, dsize=blackImg.shape[::-1])
 
     iImg = iImg[clipSize: -clipSize, clipSize: -clipSize] 
     

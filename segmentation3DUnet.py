@@ -7,155 +7,259 @@ import argparse
 import yaml
 import SimpleITK as sitk
 from pathlib import Path
+from functions import createParentPath, penalty_categorical, kidney_dice, cancer_dice
+from cut import cut3D, caluculate_area, cut_image, padAndCenterCrop, inverse_image
+from tqdm import tqdm
+import re
 
 args = None
 
 def ParseArgs():
     parser = argparse.ArgumentParser()
-    parser.add_argument("imagefile", help="Input image file")
-    parser.add_argument("modelfile", help="3D U-net model file (*.yml).")
+    parser.add_argument("imageDirectory", help="Input image file")
     parser.add_argument("modelweightfile", help="Trained model weights file (*.hdf5).")
-    parser.add_argument("outfile", help="The filename of the segmented label image")
-    parser.add_argument("--mask", help="The filename of mask image")
-    parser.add_argument("--paoutfile", help="The filename of the estimated probabilistic map file.")
-    parser.add_argument("--stepscale", help="Step scale for patch tiling.", default=1.0, type=float)
+    parser.add_argument("savePath", help="The filename of the segmented label image")
+    parser.add_argument("--patchSize", help="128-128-8", default="128-128-8")
+    parser.add_argument("--batchSize", default=1, type=int)
+    parser.add_argument("--expandSize", default=15, type=int)
+    parser.add_argument("--paddingSize", default=100, type=int)
     parser.add_argument("-g", "--gpuid", help="ID of GPU to be used for segmentation. [default=0]", default=0, type=int)
     args = parser.parse_args()
     return args
 
 
-def createParentPath(filepath):
-    Path(filepath).parent.mkdir(parents=True, exist_ok=True)
-
-
-def Padding(image, patchsize, imagepatchsize, mirroring = False):
-    padfilter = sitk.MirrorPadImageFilter() if mirroring else sitk.ConstantPadImageFilter()
-    padfilter.SetPadLowerBound(patchsize.tolist())
-    padfilter.SetPadUpperBound(imagepatchsize.tolist())
-    padded_image = padfilter.Execute(image)
-    return padded_image
-
-
 def main(_):
-    config = tf.ConfigProto()
-    config.gpu_options.allow_growth = True
-    config.allow_soft_placement = True
-    sess = tf.Session(config=config)
-    tf.keras.backend.set_session(sess)
+#    config = tf.ConfigProto()
+#    config.gpu_options.allow_growth = True
+#    config.allow_soft_placement = True
+#    sess = tf.Session(config=config)
+#    tf.keras.backend.set_session(sess)
+#
+#    # Load model.
+#    with tf.device('/device:GPU:{}'.format(args.gpuid)):
+#        print("loading 3D U-net model", args.modelweightfile, end="...", flush=True)
+#        model = tf.compat.v1.keras.models.load_model(args.modelweightfile, custom_objects={"penalty_categorical" : penalty_categorical, "kidney_dice" : kidney_dice, "caner_dice" : cancer_dice})
+#        print("Done.")
+#
+#    print("input_shape :", model.input_shape)
+#    print("output_shape :", model.output_shape)
+#
+    # ----- Start making patch. -----
+    matchobj = re.match("([0-9]+)-([0-9]+)-([0-9]+)", args.patchSize)
+    if matchobj is None:
+        print('[ERROR] Invalid patch size : {}'.format(args.patchSize))
+        return
+    patchSize  = [ int(s) for s in matchobj.groups() ]
+    print("patchSize per patch: ", patchSize)
 
-    with tf.device('/device:GPU:{}'.format(args.gpuid)):
-        print("loading 3D U-net model", args.modelfile, end="...", flush=True)
-        with open(args.modelfile) as f:
-            yamlobj = yaml.load(f)
-            model = tf.keras.models.model_from_yaml(yaml.dump(yamlobj))
-            modelversion = yamlobj["unet_version"] if "unet_version" in yamlobj else "v1"
-        print("loading weights", end="...", flush=True)
-        model.load_weights(args.modelweightfile)
-        if modelversion == "v3":
-            model = tf.keras.models.Model(inputs=model.input, outputs=model.output[0])
-        print("done")
-    print("input_shape =", model.input_shape)
-    print("output_shape =", model.output_shape)
+    labelFile = Path(args.imageDirectory) / 'segmentation.nii.gz'
+    imageFile = Path(args.imageDirectory) / 'imaging.nii.gz'
 
-    # get patchsize
-    ps = np.array(model.output_shape[1:4])[::-1]
-    ips = np.array(model.input_shape[1:4])[::-1]
-    ds = ((ips - ps) / 2).astype(np.int)
+    ## Read image
+    label = sitk.ReadImage(str(labelFile))
+    image = sitk.ReadImage(str(imageFile))
+
+    labelArray = sitk.GetArrayFromImage(label)
+    imageArray = sitk.GetArrayFromImage(image)
     
-    print("loading input image", args.imagefile, end="...", flush=True)
-    image = sitk.ReadImage(args.imagefile)
-    image_padded = Padding(image, ds, ips, mirroring = True)
-    print("done")
-    s = image_padded.GetSize()
-    print("ps:{}, ips:{}, ds:{}, s:{}".format(ps, ips, ds, s))
+    labelMinVal = labelArray.min()
+    imageMinVal = imageArray.min()
 
-    bb = None
-    maskarry = None
-    if args.mask is None:
-        bb = (ds[0], ds[0]+image.GetSize()[0]-1, ds[1], ds[1]+image.GetSize()[1]-1, ds[2], ds[2]+image.GetSize()[2]-1)
-    else:
-        print("loading mask image", args.mask, end="...", flush=True)
-        maskimage = sitk.ReadImage(args.mask)
-        if maskimage.GetPixelID() != sitk.sitkUInt8:
-            maskimage = sitk.BinaryThreshold(maskimage, 1e-6)
-        maskimage_padded = Padding(maskimage, ds, ips)
-        statfilter=sitk.LabelStatisticsImageFilter()
-        statfilter.Execute(image_padded, maskimage_padded)
-        bb = statfilter.GetBoundingBox(1)
-        maskarry = sitk.GetArrayFromImage(maskimage_padded)
-        print("done")
-    print("bb", bb)
+    # ------------Extract the maximum region with one kidney.------
+    saggitalSize = labelArray.shape[0]
+    kidneyEncounter = False
+    kidneyStartIndex = []
+    kidneyEndIndex = []
+    for x in range(saggitalSize):
+        is_kidney = (labelArray[x,...] != 0).any()
+        if is_kidney and not kidneyEncounter:
+            kidneyStartIndex.append(x)
+            kidneyEncounter = True
 
-    step = (ps / args.stepscale).astype(np.int8)
+        elif not is_kidney and kidneyEncounter:
+            kidneyEndIndex.append(x)
+            kidneyEncounter = False
 
-    totalpatches = [i for i in product( range(bb[4], bb[5], step[2]), range(bb[2], bb[3], step[1]), range(bb[0], bb[1], step[0]))]
-    num_totalpatches = len(totalpatches)
-    #patchindices = [i for i in product( range(bb[4], bb[5], ps[2]), range(bb[2], bb[3], ps[1]), range(bb[0], bb[1], ps[0]))]
+    if len(kidneyStartIndex) != 2:
+        print("The patient has horse shoe kidney")
+        sys.exit()
+    
+    largestKidneyROILabel = []#[[1つ目の腎臓の行列],[2つ目の腎臓の行列],..]
+    largestKidneyROIImage = []
 
-    label = sitk.Image(image_padded.GetSize(), sitk.sitkUInt8)
-    labelarr = sitk.GetArrayFromImage(label)
-    #print('labelarr shape: {}'.format(labelarr.shape))
-    counterarr = sitk.GetArrayFromImage(sitk.Image(image_padded.GetSize(), sitk.sitkVectorUInt8, model.output_shape[-1]))
-    paarry = np.zeros(shape=(image_padded.GetSize()[::-1] + (model.output_shape[-1],)), dtype="float32")
+    firstKidneyIndex = kidneyEndIndex[0]
+    secondKidneyIndex = kidneyStartIndex[1]
 
-    i = 1
-    for iz in range(bb[4], bb[5], step[2]):
-        for iy in range(bb[2], bb[3], step[1]):
-            for ix in range(bb[0], bb[1], step[0]):
-                p = [ix, iy, iz]
-                print("patch [{} / {}] : {}".format(i, num_totalpatches, p), end="...", flush=True)
-                i = i + 1
-                ii = [p[0]-ds[0], p[1]-ds[1], p[2]-ds[2]]
-                if ii[0]+ips[0] > s[0] or ii[1]+ips[1] > s[1] or ii[2]+ips[2] > s[2]:
-                    print("skipped")
-                    continue
-                if maskarry is not None:
-                    if np.sum(maskarry[p[2]:(p[2]+ps[2]), p[1]:(p[1]+ps[1]), p[0]:(p[0]+ps[0])]) < 1:
-                        print("skipped")
-                        continue
+    expandSize = args.expandSize
 
-                patchimage = image_padded[ii[0]:(ii[0]+ips[0]), ii[1]:(ii[1]+ips[1]), ii[2]:(ii[2]+ips[2])]
-                patchimagearray = sitk.GetArrayFromImage(patchimage)
-                patchimagearray = np.array([patchimagearray[..., np.newaxis]])
+    largestKidneyROILabel.append(labelArray[firstKidneyIndex : , ...])
+    largestKidneyROILabel.append(labelArray[: secondKidneyIndex, ...])
+    largestKidneyROIImage.append(imageArray[firstKidneyIndex : , ...])
+    largestKidneyROIImage.append(imageArray[: secondKidneyIndex, ...])
 
-                pavec = model.predict_on_batch(patchimagearray)
-                #segmentation = np.argmax(pavec, axis=-1).astype(np.uint8)
-                #labelarr[p[2]:(p[2]+ps[2]), p[1]:(p[1]+ps[1]), p[0]:(p[0]+ps[0])] = segmentation
-                paarry[p[2]:(p[2]+ps[2]), p[1]:(p[1]+ps[1]), p[0]:(p[0]+ps[0]), :] += pavec[0]
-                counterarr[p[2]:(p[2]+ps[2]), p[1]:(p[1]+ps[1]), p[0]:(p[0]+ps[0]), :] += np.ones(pavec[0].shape, dtype = np.uint8)
+    # ----------------------------------------------------------------
 
-                #if paarry is not None:
-                #    paarry[p[2]:(p[2]+ps[2]), p[1]:(p[1]+ps[1]), p[0]:(p[0]+ps[0]), :] = pavec
+    axialSize = labelArray.shape[2]
+    
+    restoreMeta= [[] for _ in range(2)]
+    stackedImageArrayList = [[] for _ in range(2)]
+    stackedLabelArrayList = [[] for _ in range(2)]
+    axisCutIndex = [[] for _ in range(2)]
+    cutIndex = [[] for _ in range(2)]
+    test = [[] for _ in range(2)]
+    for i in range(2):
+        roiLabelList= []
+        roiImageList= []
+        
+        #一つの腎臓を反転
+        if i == 1:
+            largestKidneyROILabel[i] = largestKidneyROILabel[i][::-1,:,:]
+            largestKidneyROIImage[i] = largestKidneyROIImage[i][::-1,:,:]
 
-                print("done")
+        largestKidneyROILabel[i] = np.pad(largestKidneyROILabel[i], [(args.paddingSize, args.paddingSize), (args.paddingSize, args.paddingSize), (0, 0)],"constant", constant_values= labelMinVal)
+        largestKidneyROIImage[i] = np.pad(largestKidneyROIImage[i], [(args.paddingSize, args.paddingSize), (args.paddingSize, args.paddingSize), (0, 0)], "constant", constant_values=imageMinVal)
 
-    counterarr[counterarr == 0] = 1
-    paarry = paarry / counterarr
-    labelarr = np.argmax(paarry, axis=-1).astype(np.uint8)
+        
+        #axial方向について、３D画像として切り取る
+        largestKidneyROILabel[i], largestKidneyROIImage[i], cutIndex[i], snum = cut3D(largestKidneyROILabel[i],largestKidneyROIImage[i],"axial")
+        
+        axialSize = largestKidneyROILabel[i].shape[2]
 
-    print("saving segmented label to", args.outfile, end="...", flush=True)
-    createParentPath(args.outfile)
-    labelarr = labelarr[ds[2]:-ips[2], ds[1]:-ips[1], ds[0]:-ips[0]]
-    label = sitk.GetImageFromArray(labelarr)
-    label.SetOrigin(image.GetOrigin())
-    label.SetSpacing(image.GetSpacing())
-    label.SetDirection(image.GetDirection())
-    sitk.WriteImage(label, args.outfile, True)
-    print("done")
+        ##最大サイズの腎臓を持つスライスの特定
+        mArea = []
+        for x in range(axialSize):
+            mArea.append(caluculate_area(largestKidneyROILabel[i][:,:, x]))
+            maxArea = np.argmax(mArea)
+        
+        #最大サイズのスライスの幅、高さの計算
+        maxAreaLabelArray = largestKidneyROILabel[i][..., maxArea]
+        roi, maxCenter, maxwh, maxAngle = cut_image(maxAreaLabelArray, paddingSize=expandSize)
 
-    if args.paoutfile is not None:
-        createParentPath(args.paoutfile)
-        print("saving PA to", args.paoutfile, end="...", flush=True)
-        paarry = paarry[ds[2]:-ips[2], ds[1]:-ips[1], ds[0]:-ips[0], :]
-        pa = sitk.GetImageFromArray(paarry, isVector=True)
-        pa.SetOrigin(image.GetOrigin())
-        pa.SetSpacing(image.GetSpacing())
-        pa.SetDirection(image.GetDirection())
-        sitk.WriteImage(pa, args.paoutfile, True)
-        print("done")
+        maxWH = (max(maxwh), max(maxwh))
+
+        # Extract roi per slice
+        for x in range(axialSize):
+            a = caluculate_area(largestKidneyROILabel[i][:,:,x])
+            
+            ##腎臓のない領域の画像保存
+            if a==0:
+                x0 = maxCenter[1] - int((maxWH[1]+15)/2)
+                x1 = maxCenter[1] + int((maxWH[1]+15)/2)
+                y0 = maxCenter[0] - int((maxWH[0]+15)/2)
+                y1 = maxCenter[0] + int((maxWH[0]+15)/2)
+
+                roi_label = largestKidneyROILabel[i][x0 :x1, y0 :y1, x]
+                roi_image = largestKidneyROIImage[i][x0 :x1, y0 :y1, x]
+
+                center = maxCenter
+                wh = maxWH
+                angle = 0
+
+            ##腎臓領域ありの時
+            else:
+                roi, center, wh, angle = cut_image(largestKidneyROILabel[i][..., x],wh=maxWH, paddingSize=expandSize)##中心,角度取得
+                roi_label = roi
+                    
+                roi, center, wh, angle = cut_image(largestKidneyROIImage[i][..., x], center=center, wh=wh, angle=angle, paddingSize=expandSize)
+                roi_image = roi
+
+            restoreMeta[i].append([
+                largestKidneyROILabel[i][..., x], 
+                center, angle
+                ])
+
+
+            roiLabelList.append(roi_label)
+            roiImageList.append(roi_image)
+
+        length = len(roiLabelList)
+        imageZero = np.zeros_like(roi_label) + imageMinVal
+        labelZero = np.zeros_like(roi_label) + labelMinVal
+        
+        for x in range(-patchSize[2] + 1, length):
+            stackedImageArray = []
+            for o in range(patchSize[2]):
+                if 0 <= x + o < length:
+                    stackedImageArray.append(roiImageList[x + o])
+
+                else:
+                    stackedImageArray.append(imageZero)
+
+
+            #For test
+            if x >= 0:
+                test[i].append(roiLabelList[x])
+
+            stackedImageArray = np.dstack(stackedImageArray)
+            stackedImageArray = padAndCenterCrop(stackedImageArray, patchSize)
+            stackedImageArrayList[i].append(stackedImageArray)
+
+        # ----- Finish making patch. -----
+
+    # restoreDict -> Meta data for image restoration.
+    # stackedImageArrayList -> The list which has patched images.
+
+    # ----- Start segmenting -----
+    predictArray = [[] for _ in range(2)]
+    for i in range(2):
+        #Remove batch dimension
+#        outputSize = model.output_shape[1:]
+#
+#        predictArraySize = outputSize.copy()
+#        predictArraySize[2] = len(stackedImageArrayList[i]) + 2 * (predictArraySize[2] - 1)
+#        predictArray[i] = np.zeros(predictArraySize)
+#
+#        patchAxisSize = outputSize[2]
+#        length = len(stackedImageArrayList[i])
+#        for x, stackedImageArray in enumerate(stackedImageArrayList[i]):
+#            stackedImageArray = [np.newaxis, ...]
+#            print("Shape of input image : {}".format(stackedImageArray))
+#            preArray = model.predict(stackedImageArray, batch_size=args.batchSize)
+#            preArray.reshape(outputSize)
+#
+#            predictArray[i][.., x + patchAxisSize, ...] += preArray
+#
+#        slices = slice(patchAxisSize - 1, patchAxisSize + length + 1)
+#        
+#        predictArray[i] = predictArray[..., slices, ...]
+#
+#        predictArray[i] /= patchAxisSize
+#        predictArray[i] = np.argmax(predictArray[i], axis=-1).astype(np.int)
+
+        #For test
+        predictArray[i] = np.dstack(test[i])
+    # ----- Finish segmenting. -----
+
+    # predictArray -> segmented arary by U-Net.
+
+    # ----- Start restoring image. -----
+    outputArray = np.zeros_like(labelArray)
+    for i in range(2):
+        length = predictArray[i].shape[2]
+        restoreImageArrayList = []
+        for l in tqdm(range(length), desc="Segmenting...", ncols=60):
+            restoreImageArray = inverse_image(predictArray[i][l], *restoreMeta[i][l], paddingSize=args.expandSize, clipSize=args.paddingSize)
+            restoreImageArrayList.append(restoreImageArray)
+        restoreImageArray = np.dstack(restoreImageArrayList)
+
+        slices = slice(cutIndex[i][0], cutIndex[i][-1] + 1)
+        if i == 1:
+            restoreImageArray = restoreImageArray[-1, ...]
+            outputArray[: secondKidneyIndex, :, slices] += restoreImageArray
+        else:
+            outputArray[firstKidneyIndex : , :, slices] += restoreImageArray
+    # ----- Finish restoring image. -----
+
+    output = sitk.GetImageFromArray(outputArray)
+    output.SetDirection(label.GetDirection())
+    output.SetOrigin(label.GetOrigin())
+    output.SetSpacing(label.GetSpacing())
+
+    print("Saving image to {}...".format(args.savePath))
+    sitk.WriteImage(output, args.savePath, True)
 
     tf.keras.backend.clear_session()
 
 if __name__ == '__main__':
     args = ParseArgs()
-    tf.app.run(main=main, argv=[sys.argv[0]])
+    tf.compat.v1.app.run(main=main, argv=[sys.argv[0]])

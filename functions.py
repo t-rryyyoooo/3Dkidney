@@ -255,7 +255,7 @@ def penalty_categorical(y_true,y_pred):
     k_dice = kidney_dice(y_true, y_pred)
     c_dice = cancer_dice(y_true, y_pred)
 
-    return (-1) * tf.reduce_sum( 1 / (weight_y + epsilon) * array_tf * tf.math.log(pred_tf + epsilon)) \
+    return (-1) * tf.reduce_sum( 1 / (weight_y + epsilon) * array_tf * tf.math.log(pred_tf + epsilon), axis=-1) \
        + (1 - k_dice) + (1 - c_dice)
 
 def advancedSettings(xlabel, ylabel, fontsize=20):
