@@ -62,3 +62,11 @@ def Construct3DUnetModel(input_images, nclasses, use_bn = True, use_dropout = Tr
 
     return x
 
+if __name__ == "__main__":
+
+    inputShape = (48, 48, 16, 1)
+    inputs = tf.keras.layers.Input(shape=inputShape)
+    segmentation = Construct3DUnetModel(inputs, 3)
+
+    model = tf.keras.models.Model(inputs, segmentation)
+    model.summary(line_length=150)#positions=[.33, .55, .67, .1])
